@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Weather App — AJAX + API + Promises</title>
+  <style>
+    :root { --bg1:#4facfe; --bg2:#00f2fe; --card-bg: rgba(255,255,255,0.12); }
+    body {
+      font-family: Inter, system-ui, Arial;
+      margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+      background: linear-gradient(135deg,var(--bg1),var(--bg2));
+      color:#fff; padding:20px;
+    }
+    .app {
+      width:100%; max-width:420px; background:var(--card-bg); border-radius:14px; padding:20px; box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+      backdrop-filter: blur(6px);
+    }
+    h1 { font-size:20px; margin:0 0 12px; text-align:center; }
+    form { display:flex; gap:8px; margin-bottom:12px; }
+    input[type="text"] {
+      flex:1; padding:10px 12px; border-radius:8px; border:none; outline:none; font-size:14px;
+    }
+    button { padding:10px 12px; border:none; border-radius:8px; cursor:pointer; background:#ff9800; color:#fff; }
+    .controls { display:flex; gap:8px; margin-bottom:12px; }
+    #result { min-height:110px; padding:12px; border-radius:8px; background: rgba(0,0,0,0.18); }
+    .error { color:#ffdddd; background: rgba(255,0,0,0.08); padding:8px; border-radius:6px; }
+    .weather-card { display:flex; gap:12px; align-items:center; }
+    .weather-card img { width:80px; height:80px; }
+    .small { font-size:13px; opacity:0.9; }
+    .spinner { width:28px; height:28px; border-radius:50%; border:4px solid rgba(255,255,255,0.28); border-top-color:#fff; animation: spin 0.9s linear infinite; margin:auto; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .recent { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    .chip { background: rgba(255,255,255,0.08); padding:6px 8px; border-radius:999px; font-size:13px; cursor:pointer; }
+    @media (max-width:420px) { .weather-card img { width:64px; height:64px; } }
+  </style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="Weather App">
+    <h1>🌦️ Weather App</h1>
+
+    <form id="searchForm" aria-label="search form">
+      <input id="cityInput" type="text" placeholder="Enter city" autocomplete="off" />
+      <button type="submit">Search</button>
+    </form>
+
+    <div class="controls">
+      <button id="geoBtn" type="button">Use my location</button>
+      <button id="clearRecent" type="button">Clear recent</button>
+    </div>
+
+    <div id="result" aria-live="polite"></div>
+
+    <div id="recentContainer" class="small">
+      <div style="margin-top:10px; font-size:13px; opacity:0.9">Recent:</div>
+      <div id="recent" class="recent"></div>
+    </div>
+  </div>
+
+  <script>
+    // ========== CONFIG ==========
+    const apiKey = https//openweathermap.org/; // <<-- replace this with your OpenWeather API key
+
+    // ========== DOM ==========
+    const searchForm = document.getElementById('searchForm');
+    const cityInput = document.getElementById('cityInput');
+    const result = document.getElementById('result');
+    const geoBtn = document.getElementById('geoBtn');
+    const recentEl = document.getElementById('recent');
+    const clearRecentBtn = document.getElementById('clearRecent');
+
+    // ========== UTIL =============
+    function showLoading() {
+      result.innerHTML = '<div class="spinner" aria-hidden="true"></div>';
+    }
+    function showError(msg) {
+      result.innerHTML = `<div class="error">⚠️ ${msg}</div>`;
+    }
+
+    // Render weather data
+    function renderWeather(data) {
+      const icon = data.weather[0].icon;
+      const iconUrl = `https://openweathermap.org/img/wn/${icon}@2x.png`;
+      // local time (data.dt is UTC seconds, data.timezone is offset seconds)
+      const localDate = new Date((data.dt + (data.timezone || 0)) * 1000);
+      const timeStr = localDate.toUTCString().replace('GMT', '');
+      result.innerHTML = `
+        <div class="weather-card">
+          <img src="${iconUrl}" alt="${data.weather[0].description}" />
+          <div>
+            <div style="font-weight:700; font-size:16px">${data.name}, ${data.sys.country}</div>
+            <div class="small">🌡️ ${Math.round(data.main.temp)} °C • ${data.weather[0].description}</div>
+            <div class="small">💧 Humidity: ${data.main.humidity}% • 🌬️ Wind: ${Math.round(data.wind.speed)} m/s</div>
+            <div class="small">🕒 Local: ${timeStr}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    // Save recent search (localStorage)
+    function saveRecent(city) {
+      try {
+        const key = 'weather_recent';
+        const max = 6;
+        let arr = JSON.parse(localStorage.getItem(key) || '[]');
+        city = city.trim();
+        arr = arr.filter(c => c.toLowerCase() !== city.toLowerCase()); // remove duplicates
+        arr.unshift(city);
+        if (arr.length > max) arr.length = max;
+        localStorage.setItem(key, JSON.stringify(arr));
+        renderRecent();
+      } catch (e) { console.warn(e); }
+    }
+    function renderRecent() {
+      const arr = JSON.parse(localStorage.getItem('weather_recent') || '[]');
+      recentEl.innerHTML = arr.map(c => `<div class="chip" data-city="${c}">${c}</div>`).join('');
+      // attach click events
+      [...recentEl.querySelectorAll('.chip')].forEach(el => {
+        el.addEventListener('click', () => fetchWeatherByCity(el.dataset.city));
+      });
+    }
+    clearRecentBtn.addEventListener('click', () => {
+      localStorage.removeItem('weather_recent');
+      renderRecent();
+    });
+
+    // ========== FETCH FUNCTIONS ==========
+    async function fetchWeatherByCity(city) {
+      if (!city || city.trim() === '') { showError('Please enter a city name.'); return; }
+      try {
+        showLoading();
+        const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Could not fetch weather');
+        renderWeather(data);
+        saveRecent(data.name);
+      } catch (err) {
+        showError(err.message || 'Network error');
+      }
+    }
+
+    async function fetchWeatherByCoords(lat, lon) {
+      try {
+        showLoading();
+        const url = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${apiKey}&units=metric`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || 'Could not fetch weather');
+        renderWeather(data);
+        saveRecent(data.name);
+      } catch (err) {
+        showError(err.message || 'Network error');
+      }
+    }
+
+    // ========== UI EVENTS ==========
+    searchForm.addEventListener('submit', e => {
+      e.preventDefault();
+      fetchWeatherByCity(cityInput.value);
+    });
+
+    geoBtn.addEventListener('click', () => {
+      if (!navigator.geolocation) { showError('Geolocation not supported by your browser'); return; }
+      showLoading();
+      navigator.geolocation.getCurrentPosition(
+        pos => fetchWeatherByCoords(pos.coords.latitude, pos.coords.longitude),
+        err => showError('Unable to get location: ' + err.message)
+      );
+    });
+
+    // initialize
+    renderRecent();
+  </script>
+</body>
+</html>
